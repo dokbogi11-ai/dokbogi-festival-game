@@ -1,117 +1,134 @@
 // app/api/game/horse/action/route.ts
 import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
 import { redis } from "@/lib/redis";
-import { HORSES } from "@/lib/horseRace";
+import { verifySession, COOKIE_NAME } from "@/lib/auth";
 
-const COST_DEFAULT_ITEM = 3000;
-const COST_PAUSE_3S = 4000;
-const COST_BACK_2S = 5000;
-const COST_RANDOM = 5000;
+type UserCtx =
+  | { ok: true; userId: string; userKey: string; points: number }
+  | { ok: false; error: string; status: number };
 
-async function getUserPointsById(studentId: string) {
-  if (!studentId) {
-    return { ok: false as const, error: "학생 ID가 없습니다.", status: 400 as const };
+async function getUserContext(): Promise<UserCtx> {
+  const cookieStore = cookies() as any;
+  const cookie = cookieStore.get(COOKIE_NAME) as any;
+  const token: string = cookie?.value ?? "";
+
+  if (!token) {
+    return { ok: false, error: "로그인이 필요합니다.", status: 401 };
   }
-  const userKey = `user:${studentId}`;
-  const data = await redis.hgetall(userKey);
-  const points = Number((data as any)?.points ?? 0);
+
+  const session: any = await (verifySession as any)(token).catch(() => null);
+  if (!session) {
+    return { ok: false, error: "세션이 유효하지 않습니다.", status: 401 };
+  }
+
+  const userId: string =
+    session.user?.id ??
+    session.user?.studentId ??
+    session.studentId ??
+    session.id;
+
+  if (!userId) {
+    return {
+      ok: false,
+      error: "사용자 정보를 찾을 수 없습니다.",
+      status: 401,
+    };
+  }
+
+  const userKey = `user:${userId}`;
+  const rawUser = (await redis.hgetall(userKey)) as any;
+  const points = Number(rawUser?.points ?? 0);
+
   if (!Number.isFinite(points)) {
-    return { ok: false as const, error: "포인트 정보가 잘못되었습니다.", status: 500 as const };
+    return {
+      ok: false,
+      error: "포인트 정보가 잘못되었습니다.",
+      status: 500,
+    };
   }
-  return { ok: true as const, userId: studentId, userKey, points };
-}
 
-async function setUserPoints(userKey: string, points: number) {
-  const safe = Math.trunc(points);
-  await redis.hset(userKey, { points: String(safe) });
-}
-
-function getItemCost(type: string): number {
-  switch (type) {
-    case "pause3":
-      return COST_PAUSE_3S;
-    case "back2":
-      return COST_BACK_2S;
-    case "randomSpeed":
-      return COST_RANDOM;
-    case "slowA":
-    case "slowB":
-    default:
-      return COST_DEFAULT_ITEM;
-  }
+  return { ok: true, userId, userKey, points };
 }
 
 export async function POST(req: Request) {
-  const body = (await req.json().catch(() => null)) as any;
-  const raceId = String(body?.raceId ?? "");
-  const type = String(body?.type ?? "");
-  const horseId = Number(body?.horseId ?? 0);
+  try {
+    const ctx = await getUserContext();
 
-  if (!raceId) {
+    if (!ctx.ok) {
+      return NextResponse.json(
+        { ok: false, error: ctx.error },
+        { status: ctx.status }
+      );
+    }
+
+    const { userId, userKey, points: currentPoints } = ctx;
+
+    const body: any = await req.json().catch(() => null);
+    const { raceId, cost, type } = body ?? {};
+
+    if (!raceId || typeof raceId !== "string") {
+      return NextResponse.json(
+        { ok: false, error: "raceId가 필요합니다." },
+        { status: 400 }
+      );
+    }
+
+    const raceKey = `horse:race:${raceId}`;
+
+    // 타입 명확히 캐스팅 (string | null)
+    const stateRaw = (await redis.get(raceKey)) as string | null;
+
+    if (!stateRaw) {
+      return NextResponse.json(
+        { ok: false, error: "경기 상태를 찾을 수 없습니다." },
+        { status: 404 }
+      );
+    }
+
+    // 이제 타입 보장됨
+    const state = JSON.parse(stateRaw) as any;
+
+    if (state.userId && state.userId !== userId) {
+      return NextResponse.json(
+        { ok: false, error: "자신의 경기에서만 아이템을 사용할 수 있습니다." },
+        { status: 403 }
+      );
+    }
+
+    const now = Date.now();
+    if (now >= state.raceEndsAt) {
+      return NextResponse.json(
+        { ok: false, error: "경기가 이미 종료되었습니다." },
+        { status: 400 }
+      );
+    }
+
+    const newPoints = currentPoints - Number(cost ?? 0);
+    if (newPoints < 0) {
+      return NextResponse.json(
+        { ok: false, error: "포인트가 부족합니다." },
+        { status: 400 }
+      );
+    }
+
+    await redis.hset(userKey, { points: String(newPoints) });
+
+    state.items = state.items ?? [];
+    state.items.push({ type, at: now });
+
+    await redis.set(raceKey, JSON.stringify(state), { ex: 60 * 10 });
+
+    return NextResponse.json({
+      ok: true,
+      points: newPoints,
+      used: type,
+    });
+  } catch (err) {
+    console.error("[horse/action] error", err);
     return NextResponse.json(
-      { ok: false, error: "레이스 ID가 필요합니다." },
-      { status: 400 }
+      { ok: false, error: "아이템 적용에 실패했습니다." },
+      { status: 500 }
     );
   }
-
-  if (!["pause3", "back2", "slowA", "slowB", "randomSpeed"].includes(type)) {
-    return NextResponse.json(
-      { ok: false, error: "잘못된 아이템입니다." },
-      { status: 400 }
-    );
-  }
-
-  if (!Number.isInteger(horseId) || horseId < 1 || horseId > HORSES) {
-    return NextResponse.json(
-      { ok: false, error: "잘못된 말 번호입니다." },
-      { status: 400 }
-    );
-  }
-
-  const stateRaw = await redis.get(`horse:race:${raceId}`);
-  if (!stateRaw) {
-    return NextResponse.json(
-      { ok: false, error: "경기를 찾을 수 없습니다." },
-      { status: 404 }
-    );
-  }
-
-  const state = JSON.parse(stateRaw) as any;
-
-  // 이 경기의 주인 유저 기준으로 포인트 차감
-  const ctx = await getUserPointsById(state.userId);
-  if (!ctx.ok) {
-    return NextResponse.json(
-      { ok: false, error: ctx.error },
-      { status: ctx.status }
-    );
-  }
-
-  const now = Date.now();
-  if (now >= state.raceEndsAt) {
-    return NextResponse.json(
-      { ok: false, error: "이미 경기가 끝났습니다." },
-      { status: 400 }
-    );
-  }
-
-  const cost = getItemCost(type);
-  if (ctx.points < cost) {
-    return NextResponse.json(
-      { ok: false, error: "포인트가 부족합니다." },
-      { status: 400 }
-    );
-  }
-
-  const newPoints = ctx.points - cost;
-  await setUserPoints(`user:${ctx.userId}`, newPoints);
-
-  // 효과 로그만 저장 (실제 연출은 클라에서)
-  const effects = Array.isArray(state.effects) ? state.effects : [];
-  effects.push({ at: now, type, horseId, cost });
-  state.effects = effects;
-
-  await redis.set(`horse:race:${raceId}`, JSON.stringify(state), { ex: 60 * 5 });
-
-  return NextResponse.json({ ok: true, points: newPoints });
 }
