@@ -51,7 +51,11 @@ export default function PlayerPage() {
   }
 
   if (loading) {
-    return <div className="min-h-screen bg-neutral-950 text-white p-6">불러오는 중입니다…</div>;
+    return (
+      <div className="min-h-screen bg-neutral-950 text-white p-6">
+        불러오는 중입니다…
+      </div>
+    );
   }
 
   if (!user) {
@@ -83,7 +87,9 @@ export default function PlayerPage() {
 
           <div className="mt-4">
             <div className="text-xs text-white/60">PLAYER</div>
-            <div className="mt-1 text-2xl font-black tracking-tight">{greeting}</div>
+            <div className="mt-1 text-2xl font-black tracking-tight">
+              {greeting}
+            </div>
             <div className="mt-1 text-sm text-white/60">{user.studentId}</div>
           </div>
 
@@ -104,26 +110,41 @@ export default function PlayerPage() {
           </div>
         </div>
 
-        {/* 게임 버튼 (모바일 터치 타겟 크게) */}
+        {/* 게임 버튼 */}
         <div className="mt-4 grid gap-4">
+          {/* GAME 01: 색 띠 룰렛 */}
           <button
             onClick={() => router.push("/game/horse")}
             className="rounded-3xl border border-emerald-400/20 bg-gradient-to-br from-emerald-400/10 to-white/5 p-6 text-left backdrop-blur-xl shadow-[0_0_34px_rgba(34,197,94,0.14)] active:scale-[0.99]"
           >
             <div className="text-xs text-white/60">GAME 01</div>
-            <div className="mt-1 text-2xl font-black">경마 게임</div>
-            <div className="mt-2 text-sm text-white/70">배팅 후 게임을 진행하실 수 있습니다.</div>
-            <div className="mt-4 text-emerald-300 font-extrabold">시작하기 →</div>
+            <div className="mt-1 text-2xl font-black">색 띠 룰렛</div>
+            <div className="mt-2 text-sm text-white/70">
+              STOP을 눌러 빨강·주황·노랑·초록 구간 중 어디에 멈출지
+              맞추는 게임입니다.
+            </div>
+            <div className="mt-1 text-[11px] text-white/60">
+              빨간: 전부 잃음 / 주황: 원금 / 노랑: 1.5배 / 초록: 2배
+            </div>
+            <div className="mt-4 text-emerald-300 font-extrabold">
+              시작하기 →
+            </div>
           </button>
 
+          {/* GAME 02: 나무 게임 */}
           <button
             onClick={() => router.push("/game/tree")}
             className="rounded-3xl border border-emerald-400/20 bg-gradient-to-br from-emerald-400/10 to-white/5 p-6 text-left backdrop-blur-xl shadow-[0_0_34px_rgba(34,197,94,0.14)] active:scale-[0.99]"
           >
             <div className="text-xs text-white/60">GAME 02</div>
             <div className="mt-1 text-2xl font-black">나무 게임</div>
-            <div className="mt-2 text-sm text-white/70">슬롯 결과에 따라 배당이 적용됩니다.</div>
-            <div className="mt-4 text-emerald-300 font-extrabold">시작하기 →</div>
+            <div className="mt-2 text-sm text-white/70">
+              공이 어느 슬롯으로 떨어질지 선택하고, 결과에 따라 배당을
+              받는 게임입니다.
+            </div>
+            <div className="mt-4 text-emerald-300 font-extrabold">
+              시작하기 →
+            </div>
           </button>
         </div>
       </div>

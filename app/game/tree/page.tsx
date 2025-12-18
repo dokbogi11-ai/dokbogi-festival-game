@@ -23,8 +23,8 @@ const ROWS = 5;
 
 // 삼각형 크기 / 위치 조정용 상수
 const PEG_STEP_X = 13; // 가로 간격 (%). 숫자 올리면 더 넓어짐
-const TOP_Y = 8;       // 위쪽 시작 위치 (%)
-const BOTTOM_Y = 78;   // 아래쪽 끝 위치 (%)
+const TOP_Y = 8; // 위쪽 시작 위치 (%)
+const BOTTOM_Y = 78; // 아래쪽 끝 위치 (%)
 
 // row: 0~ROWS-1, col: 0~row
 function pegX(row: number, col: number) {
@@ -42,8 +42,8 @@ function pegY(row: number) {
 // 슬롯 X좌표: 숫자 버튼(1~6) 중앙과 정확히 맞추기
 // slotIndex: 0~5 → 화면에선 1~6
 function slotX(slotIndex: number) {
-  const colWidth = 100 / SLOT_COUNT;         // 전체 100%를 6등분
-  return colWidth * (slotIndex + 0.5);       // 각 칸 중앙
+  const colWidth = 100 / SLOT_COUNT; // 전체 100%를 6등분
+  return colWidth * (slotIndex + 0.5); // 각 칸 중앙
 }
 
 // 최종 슬롯에 맞춰 떨어지는 경로 생성
@@ -106,6 +106,9 @@ export default function TreeGamePage() {
 
   const [betType, setBetType] = useState<BetType>("EXACT");
   const [betSlot, setBetSlot] = useState<number>(1);
+
+  // 💡 베팅 입력: 자유 입력용 string + 실제 금액 number
+  const [betInput, setBetInput] = useState<string>("1000");
   const [betAmount, setBetAmount] = useState<number>(1000);
 
   const [msg, setMsg] = useState<string | null>(null);
@@ -135,24 +138,35 @@ export default function TreeGamePage() {
     })();
   }, []);
 
+  // 문자열 입력 → 숫자 파싱 (state는 건드리지 않음)
+  function parseBetFromInput(): number {
+    const cleaned = betInput.replace(/[^\d]/g, "");
+    if (!cleaned) return NaN;
+    const n = Math.trunc(Number(cleaned));
+    if (!Number.isFinite(n)) return NaN;
+    return n;
+  }
+
   const canStart = useMemo(() => {
     if (!me) return false;
     if (me.role !== "player") return false;
     if (isRolling) return false;
-    if (!Number.isFinite(betAmount)) return false;
-    if (betAmount < MIN_BET || betAmount > MAX_BET) return false;
-    if (me.points < betAmount) return false;
+
+    const n = parseBetFromInput();
+    if (!Number.isFinite(n)) return false;
+    if (n < MIN_BET || n > MAX_BET) return false;
+    if (me.points < n) return false;
+
     if (betType === "EXACT" && (betSlot < 1 || betSlot > SLOT_COUNT)) return false;
     return true;
-  }, [me, isRolling, betAmount, betType, betSlot]);
+  }, [me, isRolling, betInput, betType, betSlot]);
 
-  function clampBet(v: unknown) {
-    const n = Math.trunc(Number(v));
-    if (!Number.isFinite(n)) return MIN_BET;
-    return Math.max(MIN_BET, Math.min(MAX_BET, n));
-  }
-
-  function applyResult(finalSlot: number, win: boolean, delta: number, serverPoints?: number) {
+  function applyResult(
+    finalSlot: number,
+    win: boolean,
+    delta: number,
+    serverPoints?: number
+  ) {
     setIsRolling(false);
     setLastSlot(finalSlot);
     setLastDelta(delta);
@@ -218,7 +232,22 @@ export default function TreeGamePage() {
     setMsg(null);
     setIsRolling(true);
 
-    const payload: any = { betType, amount: betAmount };
+    // 🔎 여기서 실제로만 clamp
+    let amount = parseBetFromInput();
+    if (!Number.isFinite(amount)) {
+      setIsRolling(false);
+      setMsg("베팅 금액을 입력하세요.");
+      return;
+    }
+
+    if (amount < MIN_BET) amount = MIN_BET;
+    if (amount > MAX_BET) amount = MAX_BET;
+
+    // 숫자 상태 sync
+    setBetAmount(amount);
+    setBetInput(String(amount));
+
+    const payload: any = { betType, amount };
     if (betType === "EXACT") payload.betSlot = betSlot;
 
     try {
@@ -462,8 +491,8 @@ export default function TreeGamePage() {
           <div>
             <div className="text-xs text-white/60 mb-1">베팅 금액</div>
             <input
-              value={String(betAmount)}
-              onChange={(e) => setBetAmount(clampBet(e.target.value))}
+              value={betInput}
+              onChange={(e) => setBetInput(e.target.value)}
               inputMode="numeric"
               className="w-full rounded-2xl bg-neutral-900/70 border border-white/10 p-3 outline-none focus:ring-2 focus:ring-emerald-400/60 text-lg font-extrabold"
             />

@@ -11,10 +11,10 @@ type RaceState = {
   userId?: string;
   pick: number;        // 내가 고른 말 번호
   bet: number;         // 베팅 금액
-  raceEndsAt: number;  // 경주 종료 시각(ms)
+  createdAt: number;
+  raceEndsAt?: number;
   winner?: number | null;
 
-  // 정산 후 채워지는 값들
   settled?: boolean;
   delta?: number;
   afterPoints?: number | null;
@@ -22,59 +22,68 @@ type RaceState = {
 
 type UserCtx =
   | { ok: true; userId: string; userKey: string; points: number }
-  | { ok: false; error: string; status: number };
+  | { ok: false; status: number; error: string };
 
-// ───────────────── 유저 컨텍스트 ─────────────────
-
+// ───────── 유저 정보 + 현재 포인트 가져오기 ─────────
 async function getUserContext(): Promise<UserCtx> {
-  const cookieStore = cookies() as any;
-  const cookie = cookieStore.get(COOKIE_NAME) as any;
-  const token: string = cookie?.value ?? "";
+  try {
+    const cookieStore = cookies() as any;
+    const token: string = cookieStore.get(COOKIE_NAME)?.value ?? "";
 
-  if (!token) {
-    return { ok: false, error: "로그인이 필요합니다.", status: 401 };
-  }
+    if (!token) {
+      return { ok: false, status: 401, error: "로그인이 필요합니다." };
+    }
 
-  const session: any = await (verifySession as any)(token).catch(() => null);
-  if (!session) {
-    return { ok: false, error: "세션이 유효하지 않습니다.", status: 401 };
-  }
+    const session: any = await (verifySession as any)(token).catch(() => null);
+    if (!session) {
+      return {
+        ok: false,
+        status: 401,
+        error: "세션이 유효하지 않습니다.",
+      };
+    }
 
-  const userId: string =
-    session.user?.id ??
-    session.user?.studentId ??
-    session.studentId ??
-    session.id;
+    const userId: string =
+      session.user?.id ??
+      session.user?.studentId ??
+      session.studentId ??
+      session.id;
 
-  if (!userId) {
+    if (!userId) {
+      return {
+        ok: false,
+        status: 401,
+        error: "사용자 정보를 찾을 수 없습니다.",
+      };
+    }
+
+    const userKey = `user:${userId}`;
+    const rawUser = (await redis.hgetall(userKey)) as any;
+    const points = Number(rawUser?.points ?? 0);
+
+    if (!Number.isFinite(points)) {
+      return {
+        ok: false,
+        status: 500,
+        error: "포인트 정보가 잘못되었습니다.",
+      };
+    }
+
+    return { ok: true, userId, userKey, points };
+  } catch (err) {
+    console.error("[horse/finish] getUserContext error", err);
     return {
       ok: false,
-      error: "사용자 정보를 찾을 수 없습니다.",
-      status: 401,
-    };
-  }
-
-  const userKey = `user:${userId}`;
-  const rawUser = (await redis.hgetall(userKey)) as any;
-  const points = Number(rawUser?.points ?? 0);
-
-  if (!Number.isFinite(points)) {
-    return {
-      ok: false,
-      error: "포인트 정보가 잘못되었습니다.",
       status: 500,
+      error: "사용자 정보를 불러오는 중 오류가 발생했습니다.",
     };
   }
-
-  return { ok: true, userId, userKey, points };
 }
 
-// ───────────────── 정산 엔드포인트 ─────────────────
-
+// ───────── 정산 엔드포인트 ─────────
 export async function POST(req: Request) {
   try {
     const ctx = await getUserContext();
-
     if (!ctx.ok) {
       return NextResponse.json(
         { ok: false, error: ctx.error },
@@ -95,9 +104,7 @@ export async function POST(req: Request) {
     }
 
     const raceKey = `horse:race:${raceId}`;
-
-    // redis.get 결과를 any로 받고, JSON.parse 전에 안전 처리
-    const raw: any = await redis.get(raceKey);
+    const raw = (await redis.get(raceKey)) as string | null;
 
     if (!raw) {
       return NextResponse.json(
@@ -106,12 +113,9 @@ export async function POST(req: Request) {
       );
     }
 
-    // ✅ 타입스크립트가 뭐라고 하든, 여기서는 string으로 강제 변환
-    const state = (typeof raw === "string"
-      ? JSON.parse(raw)
-      : JSON.parse(String(raw))) as RaceState;
+    const state = JSON.parse(raw) as RaceState;
 
-    // 경기 주인 확인 (있으면)
+    // 내가 아닌 다른 사람이 정산 못 하게
     if (state.userId && state.userId !== userId) {
       return NextResponse.json(
         { ok: false, error: "자신의 경기만 정산할 수 있습니다." },
@@ -119,17 +123,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const now = Date.now();
-
-    // 아직 안 끝났으면 정산 불가
-    if (now < state.raceEndsAt) {
-      return NextResponse.json(
-        { ok: false, error: "경기가 아직 종료되지 않았습니다." },
-        { status: 400 }
-      );
-    }
-
-    // 이미 정산된 경기라면 저장된 값 그대로 반환
+    // 이미 정산된 경기면 저장된 값 그대로 돌려주기
     if (state.settled && typeof state.afterPoints === "number") {
       return NextResponse.json({
         ok: true,
@@ -140,21 +134,38 @@ export async function POST(req: Request) {
       });
     }
 
-    // ── 승패 및 배당 계산 ──
     const bet = Number(state.bet ?? 0);
     const pick = Number(state.pick ?? 0);
 
+    if (!Number.isFinite(bet) || bet <= 0) {
+      return NextResponse.json(
+        { ok: false, error: "베팅 정보가 잘못되었습니다." },
+        { status: 500 }
+      );
+    }
+
+    // 승자 없으면 여기서 1~HORSES 중 하나 랜덤으로 정함
     let winner = Number(state.winner ?? NaN);
     if (!Number.isFinite(winner) || winner < 1 || winner > HORSES) {
-      winner = Math.floor(Math.random() * HORSES) + 1; // 1~5
+      winner = Math.floor(Math.random() * HORSES) + 1;
     }
 
     const win = pick === winner;
-    const delta = win ? bet : -bet;
-    const newPoints = currentPoints + delta;
 
-    // 포인트 / 경기 상태 저장
+    // ✅ tree 게임과 동일한 구조:
+    // newPoints = currentPoints - bet + reward
+    const reward = win ? bet * 2 : 0;
+    const newPoints = currentPoints - bet + reward;
+    const delta = newPoints - currentPoints; // 이기면 +bet, 지면 -bet
+
+    // 포인트 저장
     await redis.hset(userKey, { points: String(newPoints) });
+
+    // (선택) 랭킹도 쓰고 싶으면 활성화
+    await redis.zadd("ranking:points", {
+      score: newPoints,
+      member: userId,
+    });
 
     const newState: RaceState = {
       ...state,
@@ -175,7 +186,7 @@ export async function POST(req: Request) {
       points: newPoints,
     });
   } catch (err) {
-    console.error("[horse/finish] error", err);
+    console.error("[horse/finish] POST error", err);
     return NextResponse.json(
       { ok: false, error: "정산에 실패했습니다." },
       { status: 500 }

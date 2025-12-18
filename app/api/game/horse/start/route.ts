@@ -1,7 +1,13 @@
 // app/api/game/horse/start/route.ts
 import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
 import { redis } from "@/lib/redis";
-import { HORSES, RACE_MS } from "@/lib/horseRace";
+import { verifySession, COOKIE_NAME } from "@/lib/auth";
+
+const HORSES = 5;
+const RACE_SECONDS = 20;
+const MIN_BET = 100;
+const MAX_BET = 10000;
 
 type RaceState = {
   raceId: string;
@@ -9,96 +15,112 @@ type RaceState = {
   pick: number;
   bet: number;
   createdAt: number;
-  raceStartsAt: number;
   raceEndsAt: number;
-  winner?: number | null;
-  settled?: boolean;
-  delta?: number;
-  beforePoints?: number;
-  afterPoints?: number;
+  settled: boolean;
+  winner: number | null;
+  delta: number;
+  afterPoints: number | null;
 };
 
-const BET_MIN = 100;
-const BET_MAX = 10000;
+async function getUserIdFromCookie(): Promise<string | null> {
+  const cookieStore = await cookies();
+  const token = cookieStore.get(COOKIE_NAME)?.value ?? "";
+  if (!token) return null;
 
-async function getUserPointsById(studentId: string) {
-  if (!studentId) {
-    return { ok: false as const, error: "학생 ID가 없습니다.", status: 400 as const };
+  try {
+    const session: any = await verifySession(token);
+    const studentId = String(session?.studentId ?? "");
+    if (!studentId) return null;
+    return studentId;
+  } catch {
+    return null;
   }
-
-  const userKey = `user:${studentId}`;
-  const data = await redis.hgetall(userKey);
-  const points = Number((data as any)?.points ?? 0);
-
-  if (!Number.isFinite(points)) {
-    return { ok: false as const, error: "포인트 정보가 잘못되었습니다.", status: 500 as const };
-  }
-
-  return { ok: true as const, userId: studentId, userKey, points };
 }
 
 export async function POST(req: Request) {
-  const body = (await req.json().catch(() => null)) as any;
-  const pick = Number(body?.pick ?? 0);
-  const bet = Math.trunc(Number(body?.bet ?? 0));
-  const studentId = String(body?.studentId ?? "");
+  try {
+    const userId = await getUserIdFromCookie();
+    if (!userId) {
+      return NextResponse.json(
+        { ok: false, error: "로그인이 필요합니다." },
+        { status: 401 }
+      );
+    }
 
-  // 말 번호 체크
-  if (!Number.isInteger(pick) || pick < 1 || pick > HORSES) {
+    const body: any = await req.json().catch(() => null);
+    const pick = Number(body?.pick);
+    const bet = Number(body?.bet);
+
+    if (!Number.isInteger(pick) || pick < 1 || pick > HORSES) {
+      return NextResponse.json(
+        { ok: false, error: "말 번호가 잘못되었습니다." },
+        { status: 400 }
+      );
+    }
+
+    if (!Number.isFinite(bet) || bet < MIN_BET || bet > MAX_BET) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: `베팅 금액은 ${MIN_BET} ~ ${MAX_BET} 사이여야 합니다.`,
+        },
+        { status: 400 }
+      );
+    }
+
+    const userKey = `user:${userId}`;
+    const rawUser = (await redis.hgetall(userKey)) as any;
+    const currentPoints = Number(rawUser?.points ?? 0);
+
+    if (!Number.isFinite(currentPoints)) {
+      return NextResponse.json(
+        { ok: false, error: "포인트 정보가 잘못되었습니다." },
+        { status: 500 }
+      );
+    }
+
+    if (currentPoints < bet) {
+      return NextResponse.json(
+        { ok: false, error: "포인트가 부족합니다." },
+        { status: 400 }
+      );
+    }
+
+    // ✅ 경기 시작 시: 포인트에서 bet만 빼기
+    const newPoints = currentPoints - bet;
+    await redis.hset(userKey, { points: String(newPoints) });
+
+    const now = Date.now();
+    const raceId = `${userId}:${now}:${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
+    const raceKey = `horse:race:${raceId}`;
+
+    const state: RaceState = {
+      raceId,
+      userId,
+      pick,
+      bet,
+      createdAt: now,
+      raceEndsAt: now + RACE_SECONDS * 1000,
+      settled: false,
+      winner: null,
+      delta: 0,
+      afterPoints: null,
+    };
+
+    await redis.set(raceKey, JSON.stringify(state) as any);
+
+    return NextResponse.json({
+      ok: true,
+      raceId,
+      points: newPoints,
+    });
+  } catch (err) {
+    console.error("[horse/start] error", err);
     return NextResponse.json(
-      { ok: false, error: "말 번호가 올바르지 않습니다." },
-      { status: 400 }
+      { ok: false, error: "경기 시작에 실패했습니다." },
+      { status: 500 }
     );
   }
-
-  // 베팅 금액 체크
-  if (!Number.isFinite(bet) || bet < BET_MIN || bet > BET_MAX) {
-    return NextResponse.json(
-      { ok: false, error: "베팅 금액이 올바르지 않습니다." },
-      { status: 400 }
-    );
-  }
-
-  // 포인트 읽기 (쿠키 X)
-  const ctx = await getUserPointsById(studentId);
-  if (!ctx.ok) {
-    return NextResponse.json(
-      { ok: false, error: ctx.error },
-      { status: ctx.status }
-    );
-  }
-  if (ctx.points < bet) {
-    return NextResponse.json(
-      { ok: false, error: "포인트가 부족합니다." },
-      { status: 400 }
-    );
-  }
-
-  const raceId = crypto.randomUUID();
-  const now = Date.now();
-  const raceStartsAt = now;
-  const raceEndsAt = now + RACE_MS; // 20초
-
-  const state: RaceState = {
-    raceId,
-    userId: ctx.userId,
-    pick,
-    bet,
-    createdAt: now,
-    raceStartsAt,
-    raceEndsAt,
-    winner: null,
-    settled: false,
-    beforePoints: ctx.points,
-  };
-
-  await redis.set(`horse:race:${raceId}`, JSON.stringify(state), { ex: 60 * 5 });
-
-  return NextResponse.json({
-    ok: true,
-    raceId,
-    createdAt: now,
-    raceStartsAt,
-    raceEndsAt,
-  });
 }
