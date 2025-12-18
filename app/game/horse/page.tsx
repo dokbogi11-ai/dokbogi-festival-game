@@ -57,7 +57,9 @@ export default function HorseGamePage() {
 
   const [phase, setPhase] = useState<Phase>("idle");
   const [pick, setPick] = useState(1);
-  const [bet, setBet] = useState<number>(100);
+
+  const [bet, setBet] = useState<number>(MIN_BET);
+  const [betInput, setBetInput] = useState<string>(String(MIN_BET));
 
   const [horses, setHorses] = useState<Horse[]>([]);
   const [winner, setWinner] = useState<number | null>(null);
@@ -254,6 +256,19 @@ export default function HorseGamePage() {
     rafRef.current = requestAnimationFrame(tick);
   }
 
+  // 배팅 인풋 보정 (포커스 빠질 때 혹은 시작 버튼 누르기 전에 쓸 수 있음)
+  function normalizeBet() {
+    let v = parseInt(betInput.replace(/[^\d]/g, ""), 10);
+
+    if (isNaN(v)) v = MIN_BET;
+    if (v < MIN_BET) v = MIN_BET;
+    if (v > MAX_BET) v = MAX_BET;
+
+    setBet(v);
+    setBetInput(String(v));
+    return v;
+  }
+
   // 경기 시작
   async function handleStartRace() {
     if (!me) {
@@ -265,17 +280,19 @@ export default function HorseGamePage() {
       return;
     }
 
-    if (bet < MIN_BET || bet > MAX_BET) {
-      setMsg(`배팅 금액은 ${MIN_BET} ~ ${MAX_BET} 사이여야 합니다.`);
+    const normalized = normalizeBet();
+
+    if (normalized < MIN_BET || normalized > MAX_BET) {
+      setMsg(`배팅 금액은 ${MIN_BET} ~ {MAX_BET} 사이여야 합니다.`);
       return;
     }
-    if (me.points < bet) {
+    if (me.points < normalized) {
       setMsg("포인트가 부족합니다.");
       return;
     }
 
     // 서버에 먼저 bet 만큼 차감 요청
-    const ok = await settle(-bet);
+    const ok = await settle(-normalized);
     if (!ok) return;
 
     resetRace();
@@ -555,16 +572,9 @@ export default function HorseGamePage() {
                 </div>
 
                 <input
-                  value={String(bet)}
-                  onChange={(e) => {
-                    const v = Math.trunc(Number(e.target.value));
-                    if (!Number.isFinite(v)) {
-                      setBet(MIN_BET);
-                    } else {
-                      const clamped = Math.max(MIN_BET, Math.min(MAX_BET, v));
-                      setBet(clamped);
-                    }
-                  }}
+                  value={betInput}
+                  onChange={(e) => setBetInput(e.target.value)}
+                  onBlur={normalizeBet}
                   inputMode="numeric"
                   className="mt-3 w-full rounded-2xl bg-neutral-900/70 border border-white/10 p-4 outline-none focus:ring-2 focus:ring-emerald-400/60 text-lg font-extrabold"
                 />
