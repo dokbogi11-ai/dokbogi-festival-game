@@ -26,7 +26,7 @@ export default function RoleSegment({
               type="button"
               onClick={() => onChange(r)}
               className={[
-                "rounded-xl px-3 py-3 text-left transition",
+                "rounded-xl px-3 py-4 text-center transition",
                 "border",
                 active
                   ? "border-emerald-400/50 bg-emerald-400/10 shadow-[0_0_30px_rgba(34,197,94,0.18)]"
