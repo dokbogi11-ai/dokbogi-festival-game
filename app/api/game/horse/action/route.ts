@@ -4,8 +4,6 @@ import { cookies } from "next/headers";
 import { redis } from "@/lib/redis";
 import { verifySession, COOKIE_NAME } from "@/lib/auth";
 
-// ───────────────── 타입 ─────────────────
-
 type RaceState = {
   raceId: string;
   userId?: string;
@@ -107,20 +105,22 @@ export async function POST(req: Request) {
 
     const raceKey = `horse:race:${raceId}`;
 
-    // ✅ redis.get 타입을 string | null 로 명확히
-    const stateRaw = (await redis.get(raceKey)) as string | null;
+    // redis.get 결과를 any로 받아서 타입스크립트 입을 막음
+    const raw: any = await redis.get(raceKey);
 
-    if (!stateRaw) {
+    if (!raw) {
       return NextResponse.json(
         { ok: false, error: "경기 상태를 찾을 수 없습니다." },
         { status: 404 }
       );
     }
 
-    // ✅ 여기서부터는 stateRaw가 string이라는 걸 TS도 이해함
-    const state = JSON.parse(stateRaw) as RaceState;
+    // ✅ JSON.parse에 확실히 string을 넣도록 처리
+    const state = (typeof raw === "string"
+      ? JSON.parse(raw)
+      : JSON.parse(String(raw))) as RaceState;
 
-    // 경기 주인 확인 (있다면)
+    // 경기 주인 확인 (있으면)
     if (state.userId && state.userId !== userId) {
       return NextResponse.json(
         { ok: false, error: "자신의 경기에서만 아이템을 사용할 수 있습니다." },
@@ -145,7 +145,6 @@ export async function POST(req: Request) {
       );
     }
 
-    // 유저 포인트 저장
     await redis.hset(userKey, { points: String(newPoints) });
 
     // 경기 상태에 아이템 내역 추가
