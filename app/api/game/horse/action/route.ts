@@ -4,9 +4,22 @@ import { cookies } from "next/headers";
 import { redis } from "@/lib/redis";
 import { verifySession, COOKIE_NAME } from "@/lib/auth";
 
+// ───────────────── 타입 ─────────────────
+
+type RaceState = {
+  raceId: string;
+  userId?: string;
+  pick: number;
+  bet: number;
+  raceEndsAt: number;
+  items?: { type: string; at: number }[];
+};
+
 type UserCtx =
   | { ok: true; userId: string; userKey: string; points: number }
   | { ok: false; error: string; status: number };
+
+// ───────────────── 유저 컨텍스트 ─────────────────
 
 async function getUserContext(): Promise<UserCtx> {
   const cookieStore = cookies() as any;
@@ -51,6 +64,8 @@ async function getUserContext(): Promise<UserCtx> {
   return { ok: true, userId, userKey, points };
 }
 
+// ───────────────── 아이템 사용 엔드포인트 ─────────────────
+
 export async function POST(req: Request) {
   try {
     const ctx = await getUserContext();
@@ -65,18 +80,34 @@ export async function POST(req: Request) {
     const { userId, userKey, points: currentPoints } = ctx;
 
     const body: any = await req.json().catch(() => null);
-    const { raceId, cost, type } = body ?? {};
+    const raceId = String(body?.raceId ?? "");
+    const type = String(body?.type ?? "");
+    const cost = Number(body?.cost ?? 0);
 
-    if (!raceId || typeof raceId !== "string") {
+    if (!raceId) {
       return NextResponse.json(
         { ok: false, error: "raceId가 필요합니다." },
         { status: 400 }
       );
     }
 
+    if (!type) {
+      return NextResponse.json(
+        { ok: false, error: "아이템 타입이 필요합니다." },
+        { status: 400 }
+      );
+    }
+
+    if (!Number.isFinite(cost) || cost <= 0) {
+      return NextResponse.json(
+        { ok: false, error: "아이템 비용이 잘못되었습니다." },
+        { status: 400 }
+      );
+    }
+
     const raceKey = `horse:race:${raceId}`;
 
-    // 타입 명확히 캐스팅 (string | null)
+    // ✅ redis.get 타입을 string | null 로 명확히
     const stateRaw = (await redis.get(raceKey)) as string | null;
 
     if (!stateRaw) {
@@ -86,9 +117,10 @@ export async function POST(req: Request) {
       );
     }
 
-    // 이제 타입 보장됨
-    const state = JSON.parse(stateRaw) as any;
+    // ✅ 여기서부터는 stateRaw가 string이라는 걸 TS도 이해함
+    const state = JSON.parse(stateRaw) as RaceState;
 
+    // 경기 주인 확인 (있다면)
     if (state.userId && state.userId !== userId) {
       return NextResponse.json(
         { ok: false, error: "자신의 경기에서만 아이템을 사용할 수 있습니다." },
@@ -104,7 +136,8 @@ export async function POST(req: Request) {
       );
     }
 
-    const newPoints = currentPoints - Number(cost ?? 0);
+    // 포인트 차감
+    const newPoints = currentPoints - cost;
     if (newPoints < 0) {
       return NextResponse.json(
         { ok: false, error: "포인트가 부족합니다." },
@@ -112,17 +145,21 @@ export async function POST(req: Request) {
       );
     }
 
+    // 유저 포인트 저장
     await redis.hset(userKey, { points: String(newPoints) });
 
-    state.items = state.items ?? [];
-    state.items.push({ type, at: now });
+    // 경기 상태에 아이템 내역 추가
+    const newState: RaceState = {
+      ...state,
+      items: [...(state.items ?? []), { type, at: now }],
+    };
 
-    await redis.set(raceKey, JSON.stringify(state), { ex: 60 * 10 });
+    await redis.set(raceKey, JSON.stringify(newState), { ex: 60 * 10 });
 
     return NextResponse.json({
       ok: true,
-      points: newPoints,
       used: type,
+      points: newPoints,
     });
   } catch (err) {
     console.error("[horse/action] error", err);
