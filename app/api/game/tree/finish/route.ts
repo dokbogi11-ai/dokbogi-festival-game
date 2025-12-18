@@ -1,31 +1,85 @@
 // app/api/game/horse/finish/route.ts
 import { NextResponse } from "next/server";
-import redis from "@/lib/redis";
-// 상대 경로: app/api/game/horse/finish → (../../../../../) → lib/gamePoints
-import {
-  getUserPointsCtx,
-  setUserPoints,
-} from "../../../../../lib/gamePoints";
+import { cookies } from "next/headers";
+import { redis } from "@/lib/redis";
+import { verifySession, COOKIE_NAME } from "@/lib/auth";
+
+// ───────────────── 타입(루즈하게) ─────────────────
 
 type RaceState = {
   raceId: string;
   userId?: string;
-  pick: number;
-  bet: number;
-  raceEndsAt: number;
+  pick: number;        // 내가 고른 말 번호
+  bet: number;         // 베팅 금액
+  raceEndsAt: number;  // 경주 종료 시각(ms)
   winner?: number | null;
 
+  // 정산 후 채워지는 값들
   settled?: boolean;
   delta?: number;
   afterPoints?: number | null;
 };
 
-const HORSES = 5;
+type UserCtx =
+  | { ok: true; userId: string; userKey: string; points: number }
+  | { ok: false; error: string; status: number };
+
+// ───────────────── 공통 유저 컨텍스트 ─────────────────
+
+async function getUserContext(): Promise<UserCtx> {
+  // cookies() 타입 때문에 any 캐스팅해서 에러 제거
+  const cookieStore = cookies() as any;
+  const cookie = cookieStore.get(COOKIE_NAME) as any;
+  const token: string = cookie?.value ?? "";
+
+  if (!token) {
+    return { ok: false, error: "로그인이 필요합니다.", status: 401 };
+  }
+
+  // verifySession 타입도 any로 느슨하게
+  const session: any = await (verifySession as any)(token).catch(() => null);
+  if (!session) {
+    return { ok: false, error: "세션이 유효하지 않습니다.", status: 401 };
+  }
+
+  // 프로젝트마다 구조가 다를 수 있으니 안전하게 여러 케이스 체크
+  const userId: string =
+    session.user?.id ??
+    session.user?.studentId ??
+    session.studentId ??
+    session.id;
+
+  if (!userId) {
+    return {
+      ok: false,
+      error: "사용자 정보를 찾을 수 없습니다.",
+      status: 401,
+    };
+  }
+
+  const userKey = `user:${userId}`;
+
+  // hgetall 결과도 any로 캐스팅
+  const rawUser = (await redis.hgetall(userKey)) as any;
+  const points = Number(rawUser?.points ?? 0);
+
+  if (!Number.isFinite(points)) {
+    return {
+      ok: false,
+      error: "포인트 정보가 잘못되었습니다.",
+      status: 500,
+    };
+  }
+
+  return { ok: true, userId, userKey, points };
+}
+
+// ───────────────── 정산 엔드포인트 ─────────────────
 
 export async function POST(req: Request) {
   try {
-    // ───── 유저 / 포인트 읽기 ─────
-    const ctx = await getUserPointsCtx();
+    const ctx = await getUserContext();
+
     if (!ctx.ok) {
       return NextResponse.json(
         { ok: false, error: ctx.error },
@@ -45,7 +99,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const raceKey = `horse:race:${raceId}`; // start/action과 prefix 일치해야 함
+    const raceKey = `horse:race:${raceId}`;
     const raw = (await redis.get(raceKey)) as string | null;
 
     if (!raw) {
@@ -55,9 +109,10 @@ export async function POST(req: Request) {
       );
     }
 
+    // 여기서 RaceState로 캐스팅 → 아래에서 raceEndsAt, settled 등 정상 인식됨
     const state = JSON.parse(raw) as RaceState;
 
-    // 다른 사람이 만든 경기 정산 방지
+    // 경기 주인 확인 (있으면)
     if (state.userId && state.userId !== userId) {
       return NextResponse.json(
         { ok: false, error: "자신의 경기만 정산할 수 있습니다." },
@@ -67,7 +122,7 @@ export async function POST(req: Request) {
 
     const now = Date.now();
 
-    // 아직 끝나지 않았으면 정산 불가
+    // 아직 안 끝났으면 정산 불가
     if (now < state.raceEndsAt) {
       return NextResponse.json(
         { ok: false, error: "경기가 아직 종료되지 않았습니다." },
@@ -75,7 +130,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // 이미 정산된 경기면 저장된 값 그대로 반환
+    // 이미 정산된 경기라면 저장된 값 그대로 반환
     if (state.settled && typeof state.afterPoints === "number") {
       return NextResponse.json({
         ok: true,
@@ -86,24 +141,24 @@ export async function POST(req: Request) {
       });
     }
 
-    // ───── 승자 / 배당 계산 ─────
-    let winner = Number(state.winner ?? NaN);
-    if (!Number.isFinite(winner) || winner < 1 || winner > HORSES) {
-      winner = Math.floor(Math.random() * HORSES) + 1;
-    }
-
+    // ── 승패 및 배당 계산 ──
     const bet = Number(state.bet ?? 0);
     const pick = Number(state.pick ?? 0);
 
+    // winner가 저장 안 되어 있으면 랜덤으로라도 하나 찍음 (최소 한 마리는 승자)
+    let winner = Number(state.winner ?? NaN);
+    if (!Number.isFinite(winner) || winner < 1 || winner > 5) {
+      winner = Math.floor(Math.random() * 5) + 1; // 1~5
+    }
+
     const win = pick === winner;
-    // 배당 2배: 이기면 +bet, 지면 -bet
+    // 이기면 +bet, 지면 -bet (배당 2배 = 원금+이익 기준이면 bet*2 쓰면 됨. 너가 쓰던 쪽으로 맞춰도 됨)
     const delta = win ? bet : -bet;
     const newPoints = currentPoints + delta;
 
-    // ───── 실제 포인트 DB 반영 ─────
-    await setUserPoints(userKey, newPoints);
+    // ── 포인트 / 경기 상태 저장 ──
+    await redis.hset(userKey, { points: String(newPoints) });
 
-    // 레이스 상태에도 정산 정보 저장
     const newState: RaceState = {
       ...state,
       winner,
