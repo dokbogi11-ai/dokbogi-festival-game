@@ -1,3 +1,4 @@
+// app/game/holse/page.tsx
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -16,7 +17,7 @@ type Color = "red" | "orange" | "yellow" | "green";
 const MIN_BET = 100;
 const MAX_BET = 10000;
 
-// 왼→오 색 띠
+// 왼→오 색 띠 (한 줄)
 const STRIP: Color[] = [
   "red",
   "red",
@@ -205,7 +206,7 @@ export default function ColorGamePage() {
       const phaseNow = phaseRef.current;
 
       // 한 칸 이동
-      const idx = stepIndex();
+      const movedIdx = stepIndex();
 
       if (phaseNow === "slowing") {
         slowStepsRef.current += 1;
@@ -215,7 +216,7 @@ export default function ColorGamePage() {
           speedRef.current += 35;
         }
 
-        // 감속 단계가 충분하면, 지금 위치에서 바로 정지 + 정산
+        // 감속 단계가 충분하면, 지금 위치 근처에서 바로 정지 + 정산
         const canStop =
           slowStepsRef.current >= maxSlowStepsRef.current &&
           speedRef.current >= 260;
@@ -223,17 +224,35 @@ export default function ColorGamePage() {
         if (canStop) {
           clearSpinTimer();
 
-          const idxNow = currentIndexRef.current ?? idx;
-          const color = STRIP[idxNow];
+          // ───── 여기서 "정산용 인덱스"를 화살표 위치에 정확히 맞춘다 ─────
+          const last = STRIP.length - 1;
+
+          // 현재 화살표가 가리키는 칸
+          let idxNow = currentIndexRef.current ?? movedIdx;
+
+          // 한 칸 씩 밀리던 버그 방지:
+          // 이동 방향으로 한 칸 앞이 아니라, "현재 보이는 칸" 기준으로 정산.
+          // 혹시라도 렌더링 타이밍 때문에 앞칸이 잡히면, 바로 지금 칸으로 덮어씀.
+          if (idxNow < 0) idxNow = 0;
+          if (idxNow > last) idxNow = last;
+
+          const settleIdx = idxNow;
+
+          // 화살표도 정산 인덱스로 강제 고정
+          currentIndexRef.current = settleIdx;
+          setCurrentIndex(settleIdx);
+
+          const color = STRIP[settleIdx];
 
           // 베팅 금액 다시 읽기
           const bet = betAmount;
 
+          // delta = "순이익"
           let delta = 0;
           if (color === "red") {
             delta = -bet; // 전부 잃음
           } else if (color === "orange") {
-            delta = 0; // 원금
+            delta = 0; // 원금 회수
           } else if (color === "yellow") {
             delta = Math.floor(bet * 0.5); // 1.5배 → 순이익 0.5배
           } else if (color === "green") {
