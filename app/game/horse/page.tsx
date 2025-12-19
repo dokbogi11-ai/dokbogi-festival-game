@@ -1,4 +1,3 @@
-// app/game/holse/page.tsx
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -17,9 +16,8 @@ type Color = "red" | "orange" | "yellow" | "green";
 const MIN_BET = 100;
 const MAX_BET = 10000;
 
-// 왼→오 색 띠 (한 줄)
+// 왼→오 색 띠
 const STRIP: Color[] = [
-  "red",
   "red",
   "red",
   "red",
@@ -31,7 +29,6 @@ const STRIP: Color[] = [
   "yellow",
   "orange",
   "orange",
-  "red",
   "red",
   "red",
   "red",
@@ -59,13 +56,16 @@ function colorClass(c: Color) {
   }
 }
 
-// 서버에 delta만 보내서 포인트 정산 (horse/settle 사용)
-async function settleOnServer(delta: number): Promise<number | null> {
+/**
+ * 서버에 delta, studentId 보내서 포인트 정산
+ * → /api/game/horse/settle
+ */
+async function settleOnServer(studentId: string, delta: number): Promise<number | null> {
   try {
     const res = await fetch("/api/game/horse/settle", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ delta }),
+      body: JSON.stringify({ studentId, delta }),
     });
 
     const data = await res.json().catch(() => null);
@@ -90,11 +90,11 @@ export default function ColorGamePage() {
 
   const [phaseState, setPhaseState] = useState<Phase>("idle");
   const phaseRef = useRef<Phase>("idle");
+  const phase: Phase = phaseState;
   const setPhase = (p: Phase) => {
     phaseRef.current = p;
     setPhaseState(p);
   };
-  const phase = phaseState;
 
   const [betAmount, setBetAmount] = useState<number>(MIN_BET);
   const [betInput, setBetInput] = useState<string>(String(MIN_BET));
@@ -123,7 +123,7 @@ export default function ColorGamePage() {
       const data = await res.json().catch(() => null);
       setMe(data?.user ?? null);
     } catch {
-      // 무시
+      // ignore
     }
   }
 
@@ -143,7 +143,7 @@ export default function ColorGamePage() {
     };
   }, []);
 
-  // 베팅 인풋 보정
+  // 베팅 인풋 보정 (blur 시)
   function normalizeBet() {
     let v = parseInt(betInput.replace(/[^\d]/g, ""), 10);
     if (isNaN(v)) v = MIN_BET;
@@ -205,18 +205,18 @@ export default function ColorGamePage() {
     const tick = () => {
       const phaseNow = phaseRef.current;
 
-      // 한 칸 이동
-      const movedIdx = stepIndex();
+      // 한 칸 이동 후 인덱스
+      const idx = stepIndex();
 
       if (phaseNow === "slowing") {
         slowStepsRef.current += 1;
 
-        // STOP 이후: 딜레이를 빠르게 키워서 1~2초 안에 확실히 느려지게
+        // STOP 이후: 빠르게 느려지게
         if (speedRef.current < 420) {
           speedRef.current += 35;
         }
 
-        // 감속 단계가 충분하면, 지금 위치 근처에서 바로 정지 + 정산
+        // 감속이 충분하면 지금 위치에서 바로 정지 + 정산
         const canStop =
           slowStepsRef.current >= maxSlowStepsRef.current &&
           speedRef.current >= 260;
@@ -224,35 +224,22 @@ export default function ColorGamePage() {
         if (canStop) {
           clearSpinTimer();
 
-          // ───── 여기서 "정산용 인덱스"를 화살표 위치에 정확히 맞춘다 ─────
-          const last = STRIP.length - 1;
+          const idxNow = currentIndexRef.current;
+          const color = STRIP[idxNow]; // 화살표가 가리키는 색 그대로
 
-          // 현재 화살표가 가리키는 칸
-          let idxNow = currentIndexRef.current ?? movedIdx;
+          if (!me) {
+            setPhase("result");
+            return;
+          }
 
-          // 한 칸 씩 밀리던 버그 방지:
-          // 이동 방향으로 한 칸 앞이 아니라, "현재 보이는 칸" 기준으로 정산.
-          // 혹시라도 렌더링 타이밍 때문에 앞칸이 잡히면, 바로 지금 칸으로 덮어씀.
-          if (idxNow < 0) idxNow = 0;
-          if (idxNow > last) idxNow = last;
-
-          const settleIdx = idxNow;
-
-          // 화살표도 정산 인덱스로 강제 고정
-          currentIndexRef.current = settleIdx;
-          setCurrentIndex(settleIdx);
-
-          const color = STRIP[settleIdx];
-
-          // 베팅 금액 다시 읽기
           const bet = betAmount;
+          let delta = 0;
 
           // delta = "순이익"
-          let delta = 0;
           if (color === "red") {
             delta = -bet; // 전부 잃음
           } else if (color === "orange") {
-            delta = 0; // 원금 회수
+            delta = 0; // 원금
           } else if (color === "yellow") {
             delta = Math.floor(bet * 0.5); // 1.5배 → 순이익 0.5배
           } else if (color === "green") {
@@ -267,9 +254,9 @@ export default function ColorGamePage() {
             prev ? { ...prev, points: prev.points + delta } : prev
           );
 
-          // 서버 정산
+          // 서버 정산 (Upstash에 반영)
           void (async () => {
-            const newPoints = await settleOnServer(delta);
+            const newPoints = await settleOnServer(me.studentId, delta);
             if (typeof newPoints === "number") {
               setMe((prev) =>
                 prev ? { ...prev, points: newPoints } : prev
@@ -326,7 +313,7 @@ export default function ColorGamePage() {
     setLastColor(null);
     setLastDelta(null);
 
-    // 시작 위치는 그냥 0으로 리셋
+    // 시작 위치 리셋
     currentIndexRef.current = 0;
     setCurrentIndex(0);
 
@@ -419,7 +406,7 @@ export default function ColorGamePage() {
         <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-xl p-5 space-y-4">
           <div className="flex items-center justify-between mb-2">
             <div className="text-sm font-bold text-white/85">색 띠</div>
-            {lastColor && lastDelta !== null && (
+            {lastColor !== null && lastDelta !== null && (
               <div className="text-xs text-white/60">
                 최근: {lastColor},{" "}
                 {lastDelta >= 0 ? "+" : ""}
